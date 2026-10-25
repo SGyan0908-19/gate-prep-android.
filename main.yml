@@ -1,10 +1,9 @@
-name: Build GATE Android APK
+name: Build GATE Prep APK
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
@@ -13,124 +12,23 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # GitHub-hosted Ubuntu runners already ship the Android SDK.
-      # This replaces android-actions/setup-android, which was failing with
-      # "sdkmanager exit code 1". Here we use the SDK that is already on the
-      # runner, accept its licenses, and make sure API 35 is present.
-      - name: Prepare Android SDK
+      - name: Locate project (unzips a ZIP if needed)
         shell: bash
         run: |
           set -eu
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          echo "SDK root: $SDK"
-          ls -la "$SDK" || true
-          ls "$SDK/platforms" 2>/dev/null || true
-          ls "$SDK/build-tools" 2>/dev/null || true
-
-          SDKM=""
-          if [ -d "$SDK/cmdline-tools" ]; then
-            SDKM="$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)"
-          fi
-
-          # Fallback: download Google's command-line tools if the runner lacks them.
-          if [ -z "$SDKM" ] || [ ! -x "$SDKM" ]; then
-            echo "sdkmanager not found on runner; downloading command-line tools"
-            mkdir -p "$SDK/cmdline-tools"
-            curl -fsSL -o /tmp/cmdline-tools.zip \
-              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-            unzip -q -o /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-unzip
-            rm -rf "$SDK/cmdline-tools/latest"
-            mv /tmp/cmdline-tools-unzip/cmdline-tools "$SDK/cmdline-tools/latest"
-            SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
-          fi
-          echo "Using sdkmanager: $SDKM"
-
-          # Accept licenses (needed so Gradle may auto-install anything it needs).
-          # 'yes' is killed by SIGPIPE when sdkmanager finishes, so don't fail on that.
-          set +e
-          yes | "$SDKM" --sdk_root="$SDK" --licenses > /tmp/licenses.log 2>&1
-          tail -n 5 /tmp/licenses.log
-          set -e
-
-          # Install only what is missing.
-          NEED=""
-          [ -d "$SDK/platforms/android-35" ]     || NEED="$NEED platforms;android-35"
-          [ -d "$SDK/build-tools/35.0.0" ]       || NEED="$NEED build-tools;35.0.0"
-          [ -d "$SDK/platform-tools" ]           || NEED="$NEED platform-tools"
-          if [ -n "$NEED" ]; then
-            echo "Installing:$NEED"
-            # shellcheck disable=SC2086
-            "$SDKM" --sdk_root="$SDK" $NEED
+          if [ -z "$(find . -name settings.gradle -not -path './.git/*' | head -n1)" ]; then
+            Z="$(find . -maxdepth 2 -name '*.zip' | head -n1)"
+            echo "No settings.gradle found; trying ZIP: ${Z:-none}"
+            [ -n "$Z" ] || { echo "No Gradle project and no ZIP in repo"; exit 1; }
+            mkdir -p /tmp/proj && unzip -q -o "$Z" -d /tmp/proj
+            P="$(dirname "$(find /tmp/proj -name settings.gradle | head -n1)")"
           else
-            echo "Required SDK packages already installed."
-          fi
-
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
-
-      - name: Verify project ZIP
-        run: |
-          test -f GATE_APK_Build_Project.zip
-          unzip -l GATE_APK_Build_Project.zip
-
-      - name: Extract Android project
-        run: |
-          rm -rf buildsrc
-          mkdir -p buildsrc
-          unzip -q GATE_APK_Build_Project.zip -d buildsrc
-          find buildsrc -maxdepth 6 -type f | sort
-          test -f buildsrc/gate_android_build/settings.gradle
-          test -f buildsrc/gate_android_build/app/build.gradle
-          test -f buildsrc/gate_android_build/app/src/main/AndroidManifest.xml
-
-      - name: Build debug APK
-        shell: bash
-        run: |
-          set -o pipefail
-          gradle --no-daemon --stacktrace \
-            -p buildsrc/gate_android_build \
-            assembleDebug 2>&1 | tee gradle-build.log
-
-      - name: Show build errors in run summary
-        if: failure()
-        shell: bash
-        run: |
-          {
-            echo "## Build failed - key lines from the log"
-            echo '```'
-            grep -nE "What went wrong|FAILURE|error:|Error:|Could not|Execution failed|Caused by|sdkmanager|license" gradle-build.log | head -n 60 || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: GATE-Prep-APK
-          path: buildsrc/gate_android_build/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-
-      - name: Upload build log and reports (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            gradle-build.log
-            buildsrc/gate_android_build/app/build/reports/**
-          if-no-files-found: ignore
+            P="$(dirname "$(find . -name settings.gradle -not -path './.git/*' |
