@@ -1,34 +1,38 @@
 name: Build GATE Prep APK
-
 on:
   workflow_dispatch:
   push:
     branches: [main]
-
-permissions:
-  contents: read
-
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Locate project (unzips a ZIP if needed)
-        shell: bash
+      - name: Find project
         run: |
-          set -eu
-          if [ -z "$(find . -name settings.gradle -not -path './.git/*' | head -n1)" ]; then
-            Z="$(find . -maxdepth 2 -name '*.zip' | head -n1)"
-            echo "No settings.gradle found; trying ZIP: ${Z:-none}"
-            [ -n "$Z" ] || { echo "No Gradle project and no ZIP in repo"; exit 1; }
-            mkdir -p /tmp/proj && unzip -q -o "$Z" -d /tmp/proj
-            P="$(dirname "$(find /tmp/proj -name settings.gradle | head -n1)")"
-          else
-            P="$(dirname "$(find . -name settings.gradle -not -path './.git/*' |
+          P=$(find . -name settings.gradle -not -path './.git/*' | head -n1)
+          if [ -z "$P" ]; then
+            mkdir -p /tmp/p
+            for f in $(find . -maxdepth 2 -type f -not -path './.git/*'); do
+              if unzip -tqq "$f" >/dev/null 2>&1; then unzip -q -o "$f" -d /tmp/p; fi
+            done
+            P=$(find /tmp/p -name settings.gradle | head -n1)
+          fi
+          test -n "$P"
+          echo "PD=$(cd "$(dirname "$P")" && pwd)" >> "$GITHUB_ENV"
+      - name: Accept licenses
+        run: yes | "$ANDROID_HOME"/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build
+        run: cd "$PD" && gradle --no-daemon :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gate-prep-debug-apk
+          path: ${{ env.PD }}/app/build/outputs/apk/debug/app-debug.apk
